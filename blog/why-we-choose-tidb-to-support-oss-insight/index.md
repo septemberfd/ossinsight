@@ -1,51 +1,236 @@
 ---
-title: Why We Choose TiDB to Support OSS Insight
-date: 2022-05-02
-authors: [ilovesoup]
-tags: [tidbcloud]
+title: Build a Better Github Insight Tool in a Week? A True Story
+date: 2022-06-20
+authors: [winkyao, fendy]
+tags: [tidb]
 ---
 
-Many times we hope that our data access becomes more real-time. It has diffrrent meanings for various industries. For logistics, it means that resource allocation can be carried out with a faster frequency. For e-commerce, it means quicker adjustment on promotion strategies based on sales information. It leads to faster risk management and more timely stop losses in finance as well.
+In early January 2022, Max, our CEO, a big fan of open-source, asked if my team could build a small tool to help us understand all the open-source projects on GitHub; and that if everything worked well, we should open the API to help open source developers to build better insights. In fact, GitHub continuously publishes the public events in its open-source world through the open API (Thank you and well done! Github). We can certainly learn a lot from the data! 
 
-<!--truncate-->
+I was excited that it would be a very interesting project, until Max said: “You only got one week.” Well, the boss is the boss, and although time was tight, I decided to take up this challenge. 
 
-![](./scenerios.png)
 
-For developers, it means realtime insights on topics like the latest and hottest projects in the community, the organizations that contribute the most, the programming languages that are used the most, etc. In case of you want to know more personal information, such as what projects are your friends contributing recently, who contributed the [TiDB](https://github.com/pingcap/tidb/?utm_source=ossinsight&utm_medium=referral)'s most recent PR, etc. Moreover, you want all these in real time.
+## Headache 1: We need both historical and real-time data!
 
-![](./top5-languages.png)
+After a quick research, we found [GHArchive](https://www.gharchive.org/), an open-source project that collects and archives all GitHub data from 2011 and updates it hourly. By the way, a lot of open-source analytical tools such as CNCF's [Devstats](https://github.com/cncf/devstats) rely on GH Archive too. That's awesome! 
 
-Fortunately, the [GH Archive](https://www.gharchive.org/) provides you the basic data to answer these questions. All you need is a database supporting these query. So simple!
+**Thanks to GH Archive, we found the data source.**
 
-In fact, you may find that it is not easy after you thinking about it carefully. You want the system provide the summary statistics with a large amount of data, such as the ranking of the most popular language in the figure above, as well as a large number of concurrent accesses to individual accounts. 
+But there's another problem: Hourly data is good, but not good enough. We wanted our data to be updated in real-time—or at least near real-time. We decided to directly use the [GitHub event API](https://docs.github.com/en/rest/activity/events), which collects all events that have occurred within the past hour. 
 
-You might need two systems: one of them focuses on high-concurrency detailed data services, while the other requires insight reports based on a large amount of data. Regardless of GitHub insights, you might encounter similar problems in your daily work. For example, if you are building a operational gaming data service system, you might face the customer inquery request: "I just looted the sword of infinity, but I can't find it in my backpack now!" You need to quickly locate the loot data of that unlucky player from large volume of records to get a clue of the situation. Did he accidentally destroyed the sword? Is it ninjaed? Does the bored player simply want a chat with GMs? At the mean time, the operation team is also urging: "For the recently launched class Night Lord, please give me the latest damage statistics immediately. I suspect that the Dark Hammer skill is too imba and need a nerf immediately."
+By combining the data from the GH Archive and the GitHub event API, we can gain streaming, real-time event updates.
 
-**These all require your database to achieve all together:**
-1. **Looking for a needle in a haystack**
-2. **Quick analytical insights for massive data**
-3. **Realtime updates**
 
-In the past, for massive detailed data services, you could choose NoSQL or data sharding. NoSQL is a popular choice for massive hot data storage, but its disadvantages are also quite obvious: you cannot use SQL to express complex semantics, and it also lacks a proper indexing mechanism to locate data through dimensions other than the primary key.  At the meantime, data sharding is quite cumbersome. Scaling the cluster as well as desining the partition key takes you a lot of effort. Moreover, for analytical services , you might need to deploy a dedicated analytical database, and take care of the real-time ETL pipeline. For a small number of mission critical applications, you just grit your teeth and do it. But for the increasingly complex needs of analytics and data services, you need to consider whether it is worthy or not.
+<br/>
 
-In the selection, you want a solution with the SQL capabilities of traditional databases, mature indexing mechanism, real-time reporting ability and scalability. Additionally, it's better to have a simple solution, requiring no esoteric knowledge of engineering.
+![The real-time update of GitHub events](./github-events-updates.gif)
 
-Yes, [TiDB](https://en.pingcap.com/?utm_source=ossinsight&utm_medium=referral) has them all.
+<center><em>The real-time update of GitHub events</em></center>
+
+<br/>
+
+
+## Headache 2: Wow, it's huge!
+
+After we decompressed all the data from GH Archive, we found there were more than 4.6 billion rows of GitHub events. That’s a lot of data!  We also noticed that about 300,000 rows were generated and updated each hour.
+
+<br/>
+
+![The data volume of GitHub events occurred after 2011](./github-events.png)
+
+<center><em>The data volume of GitHub events occurred after 2011</em></center>
+
+<br/>
+
+Database solution would be tricky here. Predictably, our goal is to build an application that provides real-time data insights based on a continuously growing dataset, which means scalability is a must. NoSQL databases can provide good scalability, but what follows is how to handle complex analytical queries. 
+
+[image to be updated]
+
+Another possibility is we can use OLAP databases, ClickHouse, for example. It's a normal solution, and we believe ClickHouse can handle the analytical workload very well. But ClickHouse is not designed for serving online traffic. So if we choose it, we need to use another database for the online traffic. 
+
+[image to be updated]
+
+What about sharding the database and then building an ETL pipeline to keep syncing the new events to a data warehouse? Sounds workable.
+
+<br/>
+
+![How a sharded database solution can handle the GitHub data](./sharded-architecture.png)
+
+<center><em>How a sharded database solution can handle the GitHub data</em></center>
+
+<br/>
+
+According to our project manager's (PM’s) plan, we needed to do some repo-specific or user-specific analysis, and although the total data volume was huge, the total number of events was not too large for a single project or user. This meant using the secondary indexes in RDBMS would be a good idea. But, if we decided to use the above architecture, we had to be careful in selecting the database sharding key. For example, if we use `user_id` as the sharding key, then queries based on `repo_id` will be very tricky. 
+
+On the other hand, to be honest, we're not experts on Kafka and data warehouses, mastering and building such an infrastructure in just one week was a very difficult task for us.
+
+The choice is obvious now, and don't forget PingCAP is a database company! TiDB seems a perfect fit for this, and it's a good chance to eat our own dog food. So, why not using TiDB! :) 
+
+If using TiDB, can we get: 
+- SQL support, including complex & flexible queries? ☑️ 
+- Scalability?  ☑️ 
+- Secondary index support for fast lookup? ☑️ 
+- Capability for online serving? ☑️ 
+
+Wow! It seems we got a winner! 
+
+<br/>
+
+![TiDB use the secondary index to process 4.6 billion rows of events in 4.9 ms](./tidb-scanned-kennytm.png)
+
+<center><em>TiDB use the secondary index to process 4.6 billion rows of events in 4.9 ms</em></center>
+
+<br/>
+
+
+**To choose a database to support an application like Ossinsight, we think TiDB is a reasonable choice.** Plus, its simplified technology stack means a faster go-to-market and faster delivery of my boss' assignment. 
+
+## Headache 3: We have a "pushy" PM!
+
+Just as the subtitle indicates, we have a very “pushy” PM, which is not always a bad thing. :)  His demands kept extending, from the single project analysis at the very beginning to the comparison and ranking of multiple repositories, and to other multidimensional analysis such as the geographical distribution of stargazers and contributors. What’s more pressing was that the deadlines stayed unchanged!!! 
+
+We had to keep a balance between the growing demands and the tight deadlines. 
+
+To save time, we used [Docusaurus](https://github.com/facebook/docusaurus), an open source static site generator in React with scalability, to build our website instead of establishing one from scratch. We also used [Apache Echarts](https://github.com/apache/echarts), a powerful charting library, to turn analytical results into good-looking and easy-to-understand charts. 
+
+We chose TiDB as the database to support our website and it perfectly supports SQL, so our back-end engineers could write SQL commands to handle complex and flexible analytical queries with ease and efficiency. Then, our front-end engineers just needed to display those SQL execution results in the form of good-looking charts. 
+
+Finally, we made it. We prototyped it in just one week, named it [OSS Insight](https://ossinsight.io/), short for open source software insights, continued to fine-tune it, and [officially released it on May 3](https://ossinsight.io/blog/explore-deep-in-4.6-billion-github-events/). 
+
+## How we deal with analytical queries with SQL
+
+Let's use one example to show you how we deal with complex analytical queries. 
+
+### Analyze a GitHub collection: JavaScript frameworks
+
+[OSS Insight](https://ossinsight.io/) can analyze popular GitHub collections by many metrics including the number of stars, issues, and contributors. Let’s identify which JavaScript framework has the most issue creators. 
+This is an analytical query that includes aggregation and ranking. To get the result, we only need to execute one SQL statement: 
+
+```
+SELECT
+   /*+ read_from_storage(tiflash[ge]) */
+   ci.repo_name  AS repo_name,
+   COUNT(distinct actor_login) AS num
+FROM
+   github_events ge
+   JOIN collection_items ci ON ge.repo_id = ci.repo_id
+   JOIN collections c ON ci.collection_id = c.id
+WHERE
+   type = 'IssuesEvent'
+   AND action = 'opened'
+   AND c.id = 10005
+   -- Exclude Bots
+   and actor_login not like '%bot%'
+   and actor_login not in (select login from blacklist_users)
+GROUP BY 1
+ORDER BY 2 DESC
+;
+```
+
+In the statement above, the `collections` and `collection_items` tables store the data of all GitHub repository collections in various areas. Each table has 30 rows. To get the order of issue creators, we need to associate the repository ID in the `collection_items` table with the real, 4.6-billion-row `github_events` table as shown below. 
+
+
+```
+
+mysql> select * from collection_items where collection_id = 10005;
++-----+---------------+-----------------------+-----------+
+| id  | collection_id | repo_name             | repo_id   |
++-----+---------------+-----------------------+-----------+
+| 127 | 10005         | marko-js/marko        | 15720445  |
+| 129 | 10005         | angular/angular       | 24195339  |
+| 131 | 10005         | emberjs/ember.js      | 1801829   |
+| 135 | 10005         | vuejs/vue             | 11730342  |
+| 136 | 10005         | vuejs/core            | 137078487 |
+| 138 | 10005         | facebook/react        | 10270250  |
+| 142 | 10005         | jashkenas/backbone    | 952189    |
+| 143 | 10005         | dojo/dojo             | 10160528  |
+...
+30 rows in set (0.05 sec)
+
+```
+
+Next, let's look at the execution plan. TiDB is compatible with MySQL syntax, so its execution plan looks very similar to that of MySQL.
+
+In the figure below, notice the parts in red boxes. The data in the table `collection_items` is read through `distributed[row]`, which means this data is processed by TiDB’s row storage engine, TiKV. The data in the table `github_events` is read through `distributed[column]`, which means this data is processed by TiDB’s columnar storage engine, TiFlash. TiDB uses both row and columnar storage engines to execute the same SQL statement. This is so convenient for OSS Insight because it doesn’t have to split the query into two statements. 
+
+<br/>
+
+![TiDB execution plan](./tidb-execution-plan-2.png)
+
+<center><em>TiDB execution plan</em></center>
+
+<br/>
+
+
+TiDB returns the following result: 
+
+```
++-----------------------+-------+
+| repo_name             | num   |
++-----------------------+-------+
+| angular/angular       | 11597 |
+| facebook/react        | 7653  |
+| vuejs/vue             | 6033  |
+| angular/angular.js    | 5624  |
+| emberjs/ember.js      | 2489  |
+| sveltejs/svelte       | 1978  |
+| vuejs/core            | 1792  |
+| Polymer/polymer       | 1785  |
+| jquery/jquery         | 1587  |
+| jashkenas/backbone    | 1463  |
+| ionic-team/stencil    | 1101  |
+...
+30 rows in set
+Time: 7.809s
+
+``` 
+
+Then, we just need to draw [the result](https://ossinsight.io/blog/deep-insight-into-js-framework-2021/#which-javascript-framework-have-the-widest-feedback-sources) with Apache Echarts into a more visualized chart as shown below. 
+
+<br/>
+
+![JavaScript frameworks with the most issue creators](./javascript-framework-rankings.png)
+
+<center><em>JavaScript frameworks with the most issue creators</em></center>
+
+<br/>
+
+
+Note: You can click the `REQUEST INFO` on the upper right side of each chart to get the SQL command for each result. 
+
+## Feedback: People love it!
+
+After we released OSS Insight on May 3, we have received loud applause on social media, via emails and private messages, from many developers, engineers, researchers, and people who are passionate about the open source community in various companies and industries. 
+
+I am more than excited and grateful that so many people find OSS Insight interesting, helpful, and valuable. I am also proud that my team made such a wonderful project in such a short time.
+
+
+<br/>
+
+![Applause given by developers and organizations on Twitter-1](./twitter-1.png)
+
+![Applause given by developers and organizations on Twitter-1](./twitter-2.png)
+
+<center><em>Applause given by developers and organizations on Twitter</em></center>
+
+<br/>
+
+
+## Lessons learnt 
+
+Looking back at the process that we built this project, we have learnt many mind-refreshing lessons.
+
+**First, Quick doesn’t mean dirty, as long as we make the right choices.** To build an insight tool in just one week is tricky, but thanks to those wonderful, ready-made, and open source projects such as TiDB, Docusaurus, and Echarts, we made it happen with efficiency and without compromising the quality. 
+
+**Second, it’s crucial to select the right database, especially one that supports SQL.** TiDB is a distributed SQL database with great scalability and can handle both the transactional and real-time analytical workloads. With its help, we can process billions of rows of data with ease, and use SQL commands to execute complicated real-time queries. Further, using TiDB means we can leverage its resources to go to market faster and get feedback promptly. 
+
+If you like our project or are interested in joining us, you’re welcome to **[submitting PRs here](https://github.com/pingcap/ossinsight)** to our GitHub repository. You can also follow us on [Twitter](https://twitter.com/OSSInsight) for the latest information. 
+
 
 :::note
-💡 You can read **[TiDB Documentation](https://docs.pingcap.com/tidb/stable/overview?utm_source=ossinsight&utm_medium=referral)** to get more useful infomation.
-:::
 
-As an HTAP database, TiDB has both complete transactions support and high performance analytics at ease. When users want to locate detailed data (such as querying the latest commit records via github ID or affiliated organization), you can build fine-grained indexes for multiple dimensions for fast locating and high concurrency. At the same time,  TiDB's analytics engine, [TiFlash](https://docs.pingcap.com/tidb/stable/tiflash-overview?utm_source=ossinsight&utm_medium=referral) , has built-in support for high-frequency updates. A column storage system (yes, even transactional updates of hundreds of thousands of TPS) that allows data to be seamlessly synchronized in real-time for analysis. Users only need to submit SQL queries without caring about the types of query, and the optimizer will automatically choose the optimal way to evaluate. In fact, it may not be possible for you to precisely distinguish which engine is more suitable. Consider quering for an individual organization: if it is a small organization with three or five people, the GitHub events since its creation may not exceed 10,000. While for giants like Microsoft and Alibaba, the difference on data volume is in orders of magnitude. In such case, the choice of engines becomes quite subtle, let alone separate the workloads in different databases. For TiDB, the choice is automatic: through statistical estimation, TiDB can "guess" the amount of data accessed and combine it with a cost model to find the most appropriate way to execute. In addition, TiDB is MySQL compatible with sufficient talent pool. This helps you shorten the development cycle greatly.
+### 📌 Join our workshop
 
-In fact, in addition to interesting projects like OSS Insight, TiDB has a wide range of applications in similar real-time data insights and services, such as history order serving , advertising , risk management, datahub, logistics tracking and etc.
+If you want to get your own insights, you can [join our workshop](https://share.hsforms.com/1E-qtGQWrTVmctP8kBT34gw2npzm) and try using TiDB to support your own datasets. 
 
-Unleashing the value of real-time data has become more and more important, and hope [TiDB](https://docs.pingcap.com/tidb/stable/overview?utm_source=ossinsight&utm_medium=referral) can lend you a helping hand.
-
-:::info
-### 🌟 Details in how OSS Insight works
-
-Go to read [Use TiDB Cloud to Analyze GitHub Events in 10 Minutes](/blog/try-it-yourself) and use the [Developer Tier](https://tidbcloud.com/signup?utm_source=ossinsight&utm_medium=referral) **free** for 1 year.
-
-You can find how we deal with massive github data in [Data Preparation for Analytics](/blog/how-it-works) as well!
 :::
